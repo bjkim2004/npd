@@ -26,6 +26,21 @@ DB 접속 정보는 `backend/.env` (git 제외). `DB_FORCE_SQLITE=1`이면 SQLit
 - 비밀번호는 8자 이상·영문+숫자, scrypt 해시로 `npd_users`에 저장. 토큰은 HMAC 서명, 기본 12시간(`AUTH_TOKEN_TTL_HOURS`)
 - 서명 키 `AUTH_SECRET`은 `backend/.env`에 둔다. 없으면 기동할 때마다 임시 키가 생겨 재기동 시 다시 로그인해야 한다
 
+## Slack 지연 알림
+
+- 채널: `C0C093UBJ49`. `backend/.env`에 `SLACK_WEBHOOK_URL`(Incoming Webhook) 또는 `SLACK_BOT_TOKEN`(xoxb-, `chat:write` 권한, 봇을 채널에 초대)을 넣고 백엔드를 다시 켠다
+- 보내는 경우: ① 빨강 Task(기한 지남·미완료, 지연 완료)가 새로 생길 때 Task마다 한 번 ② 지연 흡수 결과 출시일에 영향이 생길 때 한 번. 보낸 기록은 `npd_alert_log`
+- 점검 시점: 서버가 `SLACK_CHECK_INTERVAL_MIN`(기본 60)분마다, 오늘 기준 일정 조회·실적 입력 때. 기준일을 바꿔 본 가정 조회는 보내지 않는다
+- 화면 「판정·흡수 설정」에서 연결 상태 확인, 시험 발송, 지금 점검 (`backend/app/notify.py`)
+
+## Action Item (Slack → LLM → DB)
+
+- 화면 「모니터링 › Action Item」: Slack 채널 대화에서 할 일·담당자·기한·제품을 뽑아 `npd_action_items`에 저장하고, 상태(할 일/진행 중/완료)·담당·기한·제품을 바로 고친다
+- LLM: Upstage Solar(`backend/app/llm.py`, OpenAI 호환 Chat Completions). `.env`의 `UPSTAGE_API_KEY`, `UPSTAGE_MODEL`(기본 `solar-pro4`)
+- Slack 읽기: `SLACK_BOT_TOKEN`(xoxb-, `channels:history`·`users:read`, 봇을 채널에 초대) 필요. 웹훅으로는 읽을 수 없다. 마지막으로 읽은 메시지를 `npd_action_sync`에 남겨 다음에는 새 메시지만 읽는다. 봇 메시지(지연 알림)는 제외
+- 봇 토큰이 없을 때는 「대화 붙여 넣기」로 복사한 대화·회의록에서 추출. 줄 앞 날짜(`[11/04 09:12]`)를 읽어 「이번주 금요일」 같은 기한을 그 날짜 기준으로 계산
+- 같은 근거 메시지·같은 담당자 항목은 다시 저장하지 않는다. API: `GET /api/actions`, `POST /api/actions/extract/slack|text`, `PATCH|DELETE /api/actions/{id}`
+
 ## 시험 — 한 명령
 
 ```bash

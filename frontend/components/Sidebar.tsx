@@ -23,6 +23,7 @@ const I = {
   sun: "M12 8a4 4 0 100 8 4 4 0 000-8zM12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4",
   moon: "M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z",
   system: "M3.5 5h17v11h-17zM8.5 20h7M12 16v4",
+  action: "M9 11.5l2.2 2.2L15.5 9.5M4.5 4.5h15v15h-15z",
   logout: "M14 4.5h4.5v15H14M10 8l-4 4 4 4M6 12h10",
 };
 
@@ -39,6 +40,7 @@ export const MENU: Group[] = [
     items: [
       { href: "/signals", label: "신호등 현황", icon: I.signal, badge: (a) => (a.sched?.red_count ? { n: a.sched.red_count, tone: "bad" } : null) },
       { href: "/concurrent", label: "동시 진행", icon: I.overlap },
+      { href: "/actions", label: "Action Item", icon: I.action },
     ],
   },
   {

@@ -110,6 +110,40 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+export interface SlackStatus {
+  configured: boolean;
+  mode: "webhook" | "bot" | null;
+  channel: string | null;
+  interval_min: number;
+}
+
+export type ActionStatus = "할 일" | "진행 중" | "완료";
+
+export interface ActionItem {
+  id: number;
+  title: string;
+  detail: string | null;
+  owner: string | null;
+  due: string | null;
+  product: string | null;
+  status: ActionStatus;
+  source: "slack" | "text";
+  source_text: string | null;
+  source_link: string | null;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+export interface ActionSources {
+  llm: boolean;
+  model: string;
+  slack: boolean;
+  channel: string;
+  last_synced: string | null;
+}
+
+type Extracted = { messages: number; created: ActionItem[] };
+
 type AuthRes = { token: string; user: User };
 
 export const api = {
@@ -118,6 +152,17 @@ export const api = {
   login: (b: { email: string; password: string }) =>
     req<AuthRes>("/api/auth/login", { method: "POST", body: JSON.stringify(b) }),
   me: () => req<User>("/api/auth/me"),
+  actions: () => req<ActionItem[]>("/api/actions"),
+  actionSources: () => req<ActionSources>("/api/actions/sources"),
+  extractSlack: (days: number, full = false) =>
+    req<Extracted>("/api/actions/extract/slack", { method: "POST", body: JSON.stringify({ days, full }) }),
+  extractText: (text: string) => req<Extracted>("/api/actions/extract/text", { method: "POST", body: JSON.stringify({ text }) }),
+  patchAction: (id: number, b: Partial<Pick<ActionItem, "title" | "owner" | "due" | "status" | "product">>) =>
+    req<ActionItem>(`/api/actions/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
+  deleteAction: (id: number) => req(`/api/actions/${id}`, { method: "DELETE" }),
+  slackStatus: () => req<SlackStatus>("/api/alerts/slack"),
+  slackTest: () => req<{ sent: boolean }>("/api/alerts/slack/test", { method: "POST" }),
+  alertsCheck: () => req<{ queued: Record<string, number | string> }>("/api/alerts/check", { method: "POST" }),
   health: () => req<{ db: string; tasks: number; tasks_needing_check: number }>("/api/health"),
   products: () => req<Product[]>("/api/products"),
   createProduct: (b: Omit<Product, "id">) => req<{ id: number }>("/api/products", { method: "POST", body: JSON.stringify(b) }),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+from contextlib import asynccontextmanager
 from datetime import date
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, UploadFile
@@ -11,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from . import auth
+from . import actions, auth, notify
 from .db import DB_KIND, Base, engine, get_db, SessionLocal
 from .engine.absorb import absorb
 from .engine.backcalc import TaskDef, schedule
@@ -25,13 +26,24 @@ Base.metadata.create_all(engine)
 with SessionLocal() as _s:
     seed(_s)
 
-app = FastAPI(title="NPD 일정·이력 관리 API", version="0.2.0")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    stop = notify.start_scheduler(check_alerts)  # Slack 지연 알림 주기 점검
+    yield
+    if stop:
+        stop.set()
+
+
+app = FastAPI(title="NPD 일정·이력 관리 API", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","),
     allow_methods=["*"], allow_headers=["*"],
 )
 app.include_router(auth.router)
+app.include_router(actions.router)
 # 아래 api 라우터의 경로는 모두 로그인(Bearer 토큰)이 필요하다. /api/health 만 예외.
 api = APIRouter(dependencies=[Depends(auth.current_user)])
 
@@ -69,6 +81,33 @@ def scheduled(db: Session, p: Product):
         return schedule(p.launch_date, taskdefs_from_db(db), calendar_from_db(db))
     except HolidayNotRegistered as e:
         raise HTTPException(422, f"C-05: {e}") from e
+
+
+def schedule_rows(db: Session, p: Product, as_of: date) -> list[dict]:
+    """예정 일정 + 실적 + 신호등 판정"""
+    cal = calendar_from_db(db)
+    threshold = setting_int(db, "yellow_threshold")
+    actuals = {a.task_no: a.actual_end for a in db.scalars(select(Actual).where(Actual.product_id == p.id))}
+    rows = []
+    for t in scheduled(db, p):
+        d = t.to_dict()
+        a = actuals.get(t.no)
+        d["actual_end"] = a.isoformat() if a else None
+        d |= judge(t.end, a, as_of, threshold, cal)
+        rows.append(d)
+    return rows
+
+
+def check_alerts(as_of: date) -> dict:
+    """모든 제품의 빨강 Task를 점검해 새로 생긴 것만 Slack으로 보낸다."""
+    out = {}
+    with SessionLocal() as db:
+        for p in db.scalars(select(Product).order_by(Product.id)):
+            try:
+                out[p.name] = notify.notify_red(db, p, schedule_rows(db, p, as_of))
+            except HTTPException as e:  # C-05 등: 일정 계산 불가 제품은 건너뜀
+                out[p.name] = f"건너뜀: {e.detail}"
+    return out
 
 
 # ---------- schemas ----------
@@ -182,16 +221,10 @@ def delete_product(pid: int, db: Session = Depends(get_db)):
 def product_schedule(pid: int, as_of: date | None = None, db: Session = Depends(get_db)):
     p = get_product(db, pid)
     as_of = as_of or date.today()
-    cal = calendar_from_db(db)
     threshold = setting_int(db, "yellow_threshold")
-    actuals = {a.task_no: a.actual_end for a in db.scalars(select(Actual).where(Actual.product_id == pid))}
-    rows = []
-    for t in scheduled(db, p):
-        d = t.to_dict()
-        a = actuals.get(t.no)
-        d["actual_end"] = a.isoformat() if a else None
-        d |= judge(t.end, a, as_of, threshold, cal)
-        rows.append(d)
+    rows = schedule_rows(db, p, as_of)
+    if as_of == date.today():  # 가정 기준일(과거·미래)로 볼 때는 알림 보내지 않음
+        notify.notify_red(db, p, rows)
     return {"product": {"id": p.id, "name": p.name, "launch_date": p.launch_date.isoformat(),
                         "product_type": p.product_type, "process": p.process},
             "as_of": as_of.isoformat(), "threshold": threshold, "tasks": rows,
@@ -209,6 +242,7 @@ def put_actual(pid: int, task_no: int, body: ActualIn, db: Session = Depends(get
         db.add(a)
     a.actual_end = body.actual_end
     db.commit()
+    notify.notify_red(db, get_product(db, pid), schedule_rows(db, get_product(db, pid), date.today()))
     return {"product_id": pid, "task_no": task_no,
             "actual_end": body.actual_end.isoformat() if body.actual_end else None}
 
@@ -229,10 +263,34 @@ def concurrent(ids: str, db: Session = Depends(get_db)):
 def absorb_delay(pid: int, body: AbsorbIn, db: Session = Depends(get_db)):
     p = get_product(db, pid)
     try:
-        return absorb(scheduled(db, p), body.task_no, body.delay_days,
-                      setting_int(db, "absorb_limit_task"), p.launch_date, calendar_from_db(db))
+        result = absorb(scheduled(db, p), body.task_no, body.delay_days,
+                        setting_int(db, "absorb_limit_task"), p.launch_date, calendar_from_db(db))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    notify.notify_absorb(db, p, result)
+    return result
+
+
+@api.get("/api/alerts/slack")
+def slack_status():
+    return notify.status()
+
+
+@api.post("/api/alerts/slack/test")
+def slack_test(user: auth.User = Depends(auth.current_user)):
+    try:
+        notify.post(f":white_check_mark: NPD 일정 관리 지연 알림 연결 시험 ({user.name})")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e)) from e
+    return {"sent": True}
+
+
+@api.post("/api/alerts/check")
+def alerts_check():
+    """지금 바로 모든 제품의 빨강 Task를 점검(새로 생긴 것만 Slack으로)."""
+    if not notify.configured():
+        raise HTTPException(400, "Slack 설정 없음: backend/.env에 SLACK_WEBHOOK_URL 또는 SLACK_BOT_TOKEN을 넣으세요")
+    return {"queued": check_alerts(date.today())}
 
 
 app.include_router(api)

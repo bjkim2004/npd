@@ -1,0 +1,5 @@
+# gcloud run deploy --source 업로드 제외 목록(.gitignore 대신 이 파일을 쓴다)
+node_modules/
+.next/
+.env*
+*.tsbuildinfo
